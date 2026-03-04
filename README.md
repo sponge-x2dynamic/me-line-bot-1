@@ -1,93 +1,172 @@
-# me-line-bot
+# ME Bot — LINE OA Check-in/Check-out System
 
+## Stack
+- **Backend**: Go 1.22 + Gin
+- **Database**: MySQL 8
+- **Deploy**: Docker + Docker Compose บน Digital Ocean
 
+---
 
-## Getting started
+## ขั้นตอนการรันบนเครื่องตัวเอง (Local Development)
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+### 1. ติดตั้ง Docker Desktop บน macOS
+ดาวน์โหลดจาก https://www.docker.com/products/docker-desktop/
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+### 2. Clone โปรเจกต์และตั้งค่า
+```bash
+# Copy config
+cp .env.example .env
 
-## Add your files
+# แก้ไข .env ใส่ค่าจาก LINE Developers Console
+# LINE_CHANNEL_SECRET=...
+# LINE_CHANNEL_ACCESS_TOKEN=...
+```
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+### 3. รันด้วย Docker Compose
+```bash
+docker compose up --build
+```
+
+ตรวจสอบว่า server ขึ้นแล้ว:
+```bash
+curl http://localhost:8080/health
+# ผลลัพธ์: {"service":"ME Bot","status":"ok"}
+```
+
+---
+
+## ขั้นตอนการทดสอบ LINE Webhook บน Local (ใช้ ngrok)
+
+LINE ต้องการ HTTPS เพื่อส่ง webhook มาหา server
+ขณะ dev บน local ให้ใช้ ngrok เพื่อ tunnel
+
+### 1. ติดตั้ง ngrok
+```bash
+brew install ngrok
+ngrok config add-authtoken <your_ngrok_token>  # สมัครฟรีที่ ngrok.com
+```
+
+### 2. เปิด tunnel
+```bash
+ngrok http 8080
+# จะได้ URL เช่น: https://xxxx.ngrok-free.app
+```
+
+### 3. ตั้ง Webhook URL ใน LINE Developers Console
+- ไปที่ https://developers.line.biz
+- เลือก Channel → Messaging API
+- Webhook URL: `https://xxxx.ngrok-free.app/webhook`
+- กด Verify ✅
+
+---
+
+## เพิ่มข้อมูลเริ่มต้น (Shop + Employee)
+
+ตอนนี้ยังไม่มี admin UI ให้รันคำสั่ง SQL ตรงๆ ก่อน:
+
+```bash
+# เข้า MySQL container
+docker compose exec mysql mysql -u mebot -p mebot_db
+
+# เพิ่มร้าน (ใส่พิกัดและ LINE Group ID จริง)
+INSERT INTO shops (name, lat, lng, radius_m, line_group_id)
+VALUES ('ร้านกาแฟสาขา 1', 13.7563, 100.5018, 200, 'C_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
+
+# ดู shop id ที่เพิ่งเพิ่ม
+SELECT id FROM shops;
+
+# เพิ่มพนักงาน (ใส่ LINE User ID ของพนักงานจริง)
+INSERT INTO employees (line_user_id, name, shop_id)
+VALUES ('Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 'สมชาย ใจดี', 1);
+```
+
+### วิธีหา LINE User ID ของพนักงาน
+เปิด LINE Developers Console → Messaging API → เปิด "Use webhooks"
+แล้วให้พนักงาน Add bot และส่งข้อความมา จะเห็น userId ใน Webhook log
+
+### วิธีหา LINE Group ID
+Add bot เข้า group แล้วดู log ใน server:
+```bash
+docker compose logs app | grep "Bot joined"
+```
+
+---
+
+## Deploy บน Digital Ocean
+
+### 1. สร้าง Droplet
+- OS: Ubuntu 22.04 LTS
+- Plan: Basic 2GB RAM ($12/mo)
+- เปิด SSH key
+
+### 2. ติดตั้ง Docker บน Droplet
+```bash
+ssh root@<droplet-ip>
+curl -fsSL https://get.docker.com | sh
+```
+
+### 3. ติดตั้ง Nginx + SSL
+```bash
+apt install -y nginx certbot python3-certbot-nginx
+
+# ตั้งค่า Nginx
+cat > /etc/nginx/sites-available/mebot << 'EOF'
+server {
+    listen 80;
+    server_name yourdomain.com;
+
+    location / {
+        proxy_pass http://localhost:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+EOF
+
+ln -s /etc/nginx/sites-available/mebot /etc/nginx/sites-enabled/
+nginx -t && systemctl reload nginx
+
+# ออก SSL Certificate
+certbot --nginx -d yourdomain.com
+```
+
+### 4. Deploy App
+```bash
+# บน Droplet
+git clone https://github.com/yourrepo/me-bot.git
+cd me-bot
+cp .env.example .env
+# แก้ไข .env ใส่ค่าจริง
+nano .env
+
+docker compose up -d --build
+```
+
+### 5. ตั้ง Webhook URL ใน LINE
+```
+https://yourdomain.com/webhook
+```
+
+---
+
+## โครงสร้างโปรเจกต์
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/me4273033/me-line-bot.git
-git branch -M main
-git push -uf origin main
+me-bot/
+├── cmd/server/main.go          ← จุดเริ่มต้นโปรแกรม
+├── internal/
+│   ├── config/config.go        ← โหลด .env
+│   ├── database/mysql.go       ← เชื่อม MySQL + auto migrate
+│   ├── handler/webhook.go      ← รับ LINE events
+│   ├── service/
+│   │   ├── checkin.go          ← business logic check-in/out
+│   │   └── location.go         ← คำนวณระยะห่าง
+│   ├── repository/
+│   │   ├── employee.go         ← query ข้อมูลพนักงาน
+│   │   └── attendance.go       ← query ข้อมูลการเข้างาน
+│   └── model/model.go          ← struct ของ database tables
+├── .env.example
+├── Dockerfile
+├── docker-compose.yml
+└── README.md
 ```
-
-## Integrate with your tools
-
-- [ ] [Set up project integrations](https://gitlab.com/me4273033/me-line-bot/-/settings/integrations)
-
-## Collaborate with your team
-
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
